@@ -1,0 +1,5 @@
+*.pt
+CUAD*.json
+*.npz
+__pycache__/
+.DS_Store
