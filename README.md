@@ -1,144 +1,134 @@
-# Does LIME Actually Explain BERT? (A Legal-Clause Case Study)
+# Does LIME Explain a BERT Legal-Clause Classifier?
 
-**Status: pilot run complete (5 clauses). Short answer: not really — and not in the way I expected.**
+**Status (4 Oct 2026): round 4 complete. The instability I first reported was
+an artefact of my setup. With that fixed, LIME is fairly stable, and what it
+shows is that the classifier relies on contract type, not on the clause.**
 
-## Why I started this
+## Summary
 
-LIME explains a model's prediction by fitting a simple linear model
-around it — basically asking "if I nudge these words, how does the
-prediction change?" and reading off which words moved it most. That's a
-reasonable thing to do for a linear model. It's a much shakier thing to
-do for BERT, where every word's meaning is entangled with every other
-word through attention. A linear approximation of something fundamentally
-non-linear and interactive seems like it should break somewhere — the
-question is where.
-
-My guess going in was that it would break selectively, not everywhere.
-Some clause types in legal contracts are basically fixed formulas —
-*Governing Law* is almost always some version of "this agreement is
-governed by the laws of [State]." A single word or two carries the whole
-signal, so I expected LIME to find that reliably every time. Other clause
-types, like *Liquidated Damages*, only make sense as a combination — you
-need an amount, a trigger condition, and a legal term all showing up
-together. There's no single anchor word to latch onto, so I expected
-LIME's linear approximation to fall apart there specifically.
-
-That was the hypothesis: LIME should be stable on formulaic clauses and
-unstable on compositional ones, because the mismatch between "linear
-surrogate" and "attention-based interaction" should bite harder when the
-signal is genuinely compositional.
-
-## Method
-
-- **Model:** LegalPro-BERT, a `bert-base-uncased`-initialized multi-label
-  classifier fine-tuned on CUAD (41 clause types, sigmoid output,
-  classification threshold 0.35).
-- **Data:** CUAD v1, restricted to the held-out test split used
-  throughout the accompanying paper (`split_record_TRAINVALTEST_PERMANENT.json`),
-  to avoid any train/test leakage into this analysis.
-- **Clause selection (confidence-filtered):** clauses were scanned for
-  model confidence on the gold label; only clauses where the model's own
-  predicted probability was ≥0.5 were used, to avoid confounding LIME
-  instability with prediction uncertainty near the 0.35 decision threshold.
-  (An earlier, unfiltered pass using near-threshold clauses, P≈0.39–0.47,
-  produced near-zero Jaccard scores for both clause types and was discarded
-  as confounded — see `results/round1_near_threshold.json`.)
-- **Windowing:** each clause is scored using a clause-centered window
-  (the gold clause span plus surrounding context, padded to fit within
-  the model's input length), since gold clauses in CUAD frequently sit
-  thousands of tokens into the full contract, far beyond a naive
-  from-the-start truncation.
-- **Stability metric:** for each clause, LIME is run **N=5** independent
-  times (`num_samples=150` perturbations per run). Each run's top-5
-  highest-weighted words are recorded. Stability is the **mean pairwise
-  Jaccard similarity** of the top-5 word sets across all C(5,2)=10 run
-  pairs: `Jaccard(A,B) = |A∩B| / |A∪B|`, ranging 0 (no overlap) to 1
-  (identical).
-
-## What actually happened
-
-I ran this twice, in two different environments, on the same 5 clauses
-(3 Governing Law, 2 Liquidated Damages), partly to sanity-check the setup
-and partly because the first result was surprising enough that I wanted
-to see if it held up.
-
-| Clause type | Run 1 mean Jaccard@5 | Run 2 mean Jaccard@5 |
+| Round | Setup | Result |
 |---|---|---|
-| Governing Law (n=3) | 0.071 | 0.015 |
-| Liquidated Damages (n=2) | 0.056 | 0.022 |
+| 2 | 150 LIME samples; 384-token windows cut from the contract | Jaccard@5 of 0.06-0.07. Looked like LIME was unreliable. |
+| 3 | Token-budgeted windows, sample sweep | The model was unsure on almost every window (3 of 64 Governing Law clauses above 0.5). Something was wrong with the input. |
+| 4 | The model's real input (first 512 tokens of the contract), sample sweep up to 2,500 | Jaccard@5 of 0.65-0.77. Attributions follow the contract, not the label. |
 
-It didn't go the way I expected. Governing Law — the "should be easy and
-stable" clause type — wasn't stable at all. Run the same clause through
-LIME five times and you'll typically get five almost entirely different
-sets of top words; a Jaccard score under 0.1 means the runs agree on
-basically nothing. And Liquidated Damages, if anything, came out no
-worse (and in run 2, slightly better) than Governing Law — the opposite
-direction from what I'd predicted.
+## What I got wrong in round 2
 
-So the class-level story I was hoping to tell — "LIME struggles
-specifically with compositional clauses" — just isn't in this data. What
-*is* in the data is something more blunt: LIME looks unreliable on this
-model **across the board**, regardless of whether the clause type has an
-obvious anchor word or not.
+1. **Too few samples.** I used 150 perturbation samples per explanation.
+   LIME's default is 5,000.
+2. **Wrong input.** The classifier was trained on the first 512 tokens of each
+   contract. I ran LIME on 384-token windows cut from around each clause, which
+   the model had never seen. For Liquidated Damages the window was padded by
+   4,000 characters, so the clause was probably outside the model's input.
 
-One more thing worth flagging honestly: the two runs don't even agree
-with each other on the exact numbers (0.071 vs. 0.015 for Governing Law
-is a big gap). Some of that is just LIME's own randomness in how it
-perturbs text. But it's a little uncomfortable that a "stability" metric
-is itself this unstable between runs — if anything, that's more evidence
-for the broader point, not less.
+Round 2 therefore measured LIME's noise on unfamiliar input. It did not test
+my hypothesis that LIME's linear surrogate breaks on compositional clauses.
 
-**Where I've landed:** the defensible claim here isn't "LIME fails on
-compositional legal language specifically." It's "LIME's explanations
-for this BERT-based legal classifier are unreliable, full stop" — which
-is a less tidy story than I went in wanting, but it's the one the data
-actually supports, and it's still a real finding: it says something
-about the limits of applying a linear local surrogate to an
-attention-based model, just not the specific mechanism I originally
-bet on.
+## Round 4 method
 
-## What this doesn't show (yet)
+- **Model:** LegalPro-BERT fine-tuned on CUAD for 41-label clause
+  classification (test micro-F1 0.608, macro-F1 0.486, threshold 0.35, on a
+  held-out 356/76/77 contract split).
+- **Input:** the first 512 tokens of each test contract, as in training.
+- **Labels:** License Grant, Governing Law, Effective Date.
+- **Items:** 6 test contracts per label where the label is present and the
+  model predicts it.
+- **LIME:** 5 runs per item at 150, 500, 1,000 and 2,500 samples, each with a
+  different seed. Top-5 words by absolute weight.
+- **Stability:** mean pairwise Jaccard of the top-5 word sets across the 5 runs.
+  Random top-5 lists over the same vocabulary would give about 0.015.
 
-- **The sample is small** — 3 clauses and 2 clauses isn't enough to
-  rule the original hypothesis out for good, just enough to say it's
-  not showing up here. Scaling to ~10 clauses per class is the obvious
-  next step, and I haven't done it yet.
-- I've only tested this one pair of clause types. The
-  formulaic-vs-compositional idea might hold for a different pairing
-  even if it doesn't for this one.
-- I ran LIME with 150 perturbation samples per explanation, which is on
-  the low side. More samples might quiet down the per-run noise — I
-  haven't checked whether that changes the picture, and it costs more
-  compute to find out.
+## Results
 
-## Running it yourself
+### 1. Stability rises with sample count
 
-`lime_instability_round2.py` has everything. You'll need three files
-locally that aren't in this repo (see below for why):
-- `legalpro_bert_final_trainvaltest_best.pt` — the trained checkpoint
-- `CUAD_v1.json` — the CUAD dataset ([get it here](https://www.atticusprojectai.org/cuad))
-- `split_record_TRAINVALTEST_PERMANENT.json` — the held-out test-split record
+| Samples | License Grant | Governing Law | Effective Date |
+|---|---|---|---|
+| 150 | 0.10 | 0.06 | 0.06 |
+| 500 | 0.49 | 0.45 | 0.39 |
+| 1,000 | 0.61 | 0.59 | 0.55 |
+| 2,500 | 0.65 | 0.77 | 0.69 |
 
-```bash
-pip install torch transformers lime scikit-learn numpy
-MAX_RUNS=2 python3 lime_instability_round2.py
-```
+The 150-sample row reproduces round 2. There is no difference between clause
+types.
 
-It's resumable — it saves progress after every single LIME run, so if it
-times out or you want to stop partway, just run the same command again
-and it'll pick up where it left off. Keep going until you see
-`ALL RUNS COMPLETE.`.
+### 2. Attributions follow the contract, not the label
 
-## Why the data files aren't in here
+Taking the words that appear in at least 3 of 5 runs at 2,500 samples:
 
-The checkpoint's a large binary and doesn't belong in git. CUAD has its
-own license and is better pulled from the source above. The split record
-encodes derived info from the training pipeline. Reach out if you need
-any of these for verification.
+| Comparison | Pairs | Jaccard |
+|---|---|---|
+| Same contract, different label | 9 | 0.56 |
+| Same label, different contract | 45 | 0.02 |
 
-## Where this fits in the bigger picture
+For one distribution agreement, all three labels return "distributor",
+"products", "breach", "patents".
 
-This is one piece of a broader thread I'm working on — NLP
-interpretability for legal text:
-- Multi-label clause classification (LegalPro-BERT, CUAD, micro-F1 0.72) — dissertation repo
-- *"Does Compression Preserve What Classification Needs?"* — submitted to JURIX 2026, on whether compressed contract representations keep the information a classifier actually relies on
+### 3. The top words are not clause words
+
+Share of top-5 words that occur in the gold clause: Governing Law 0.05,
+Effective Date 0.01. The words LIME picks describe the kind of agreement and
+the parties: "distributor", "reseller", "collaboration", "manufacturing",
+"license", "alliance".
+
+This fits where the clauses sit. Governing Law is usually near the end of a
+contract, so it is outside the first 512 tokens in every test contract here,
+yet the model still predicts it.
+
+### 4. The linear fit is modest
+
+LIME's local R² stays near 0.4 at every sample count.
+
+## What I conclude
+
+- The low stability in round 2 was under-sampling.
+- On this model, LIME is stable enough to be informative at 1,000+ samples.
+- What it shows is that the classifier appears to use a general impression of
+  contract type from the opening text, and moves several labels together.
+
+## What this does not show
+
+- Six contracts per label and three labels. This is a pattern, not a proven
+  mechanism.
+- LIME removes every occurrence of a word at once, so it cannot show effects
+  of position or order.
+- Stable attributions are not the same as faithful ones. I have not yet
+  checked them against a deletion test or another attribution method.
+- I did not go above 2,500 samples.
+
+## Next
+
+- Deletion test: remove LIME's top words and measure the change in prediction.
+- Compare with gradient-based attribution and attention-head evidence.
+- Repeat on a classifier that sees the whole contract (chunked input).
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `round4_diagnose_and_lime.py` | Round 4: diagnostics and LIME sweep |
+| `lime_round4_summary.csv` | Stability table above |
+| `lime_round4_progress.json` | Every run: seed, top words, weights, R² |
+| `lime_round4_clauses.json` | The 18 selected items and their input text |
+| `lime_instability_round3.py` | Round 3 (superseded) |
+| `lime_instability_round2.py`, `lime_*_round2.json` | Round 2 (superseded) |
+| `split_record_TRAINVALTEST_PERMANENT.json` | Train/val/test contract hashes |
+
+## Reproducing
+
+Not included: the trained checkpoint (too large for git), CUAD
+([Atticus Project](https://www.atticusprojectai.org/cuad)) and the summary
+files used alongside it. Contact me for these.
+
+    pip install torch transformers lime scikit-learn pandas numpy
+    RUN_LIME=1 REQUIRE_VISIBLE=0 \
+      LIME_LABELS="License Grant,Governing Law,Effective Date" \
+      SAMPLE_COUNTS=150,500,1000,2500 python3 round4_diagnose_and_lime.py
+
+The run is resumable and takes about 2.5 hours on an Apple Silicon GPU.
+
+## Context
+
+The classifier comes from *"Does Compression Preserve What Classification
+Needs?"* (with Dr. Alaa Marshan, submitted to JURIX 2026). That paper does not
+use LIME; this repository is separate follow-up work.
